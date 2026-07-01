@@ -1,0 +1,215 @@
+{# Jinja template for the repair agent's task string.
+   Rendered by run_repair.py. Two RCA schemas feed this template:
+
+   A) Legacy static/coverage-based RCA (list[per-test]):
+      - rca_top1_files        : list[str]   (already test-file-filtered)
+      - rca_top5_files        : list[str]
+      - rca_evidence          : str         (compact, may be empty)
+      - rca_confidence        : "high" | "low" | "missing"
+      - repro_only_files      : list[str]   (in localizer but NOT in RCA top5)
+
+   B) Dynamic debug-agent RCA (unified schema; preferred):
+      - debug_reasoning             : str   ("" when unavailable or timed out w/o signal)
+      - debug_suggested_fix         : str
+      - debug_root_cause_files      : list[str]
+      - debug_root_cause_functions  : list[str]
+      - debug_transcript_tail       : str   (last 6 actions, tail-trimmed)
+      - debug_timed_out             : bool
+      - rich_symptom                : {file,lineno,exc_type,exc_msg} | None
+      - rich_contract_impact        : {kind,summary,callers[],callers_truncated} | None
+      - rich_propagation_frames     : list[{file,lineno,qualname,role}] | None
+      - rich_related_non_code       : list[str] | None
+      - rich_branch_observations    : list[{file,lineno,cond_text,arm_taken,locals_at_stop}] | None
+      - rich_pdb_anomalies          : list[{file,lineno,expr,value_repr,tags}] | None
+
+   Common:
+      - problem_statement     : str
+      - requirements          : str (may be empty)
+      - interface             : str (may be empty)
+      - repro_localizer_files : list[str]   (stage1 LLM localizer)
+      - repro_localizer_funcs : list[str]
+
+   When both RCA fields are empty (schema-B timed out, or schema-A missing),
+   the prompt degrades to a baseline-style render (problem + requirements
+   only) — injecting empty hints was proven to hurt more than help.
+#}
+{{ problem_statement }}
+{%- if requirements or interface %}
+
+Requirements:
+{{ requirements }}
+
+New interfaces introduced:
+{{ interface }}
+{%- endif %}
+{%- if debug_reasoning or debug_suggested_fix or debug_root_cause_files %}
+
+── Evidence from the debug agent ──
+The following was gathered by an agent that ran the reproduction test inside
+the real container, stepped through the failure with pytest/pdb/probe, and
+read the relevant sources. Treat it as evidence — not a verdict — but it is
+far higher-signal than coverage-based heuristics.
+
+{%- if debug_root_cause_files %}
+Identified root-cause files: {{ debug_root_cause_files | join(', ') }}
+{%- endif %}
+{%- if debug_root_cause_functions %}
+Identified functions: {{ debug_root_cause_functions | join(', ') }}
+{%- endif %}
+
+{%- if debug_reasoning %}
+
+Reasoning (from the debug agent's investigation):
+{{ debug_reasoning }}
+{%- endif %}
+
+{%- if debug_suggested_fix %}
+
+Suggested fix direction (from the debug agent):
+{{ debug_suggested_fix }}
+{%- endif %}
+
+{%- if rich_symptom %}
+
+Symptom site (parsed from the failing traceback):
+  {{ rich_symptom.file }}:{{ rich_symptom.lineno }} — {{ rich_symptom.exc_type }}: {{ rich_symptom.exc_msg }}
+{%- endif %}
+
+{%- if rich_propagation_frames %}
+
+Propagation path (innermost last, role-labeled):
+{%- for f in rich_propagation_frames %}
+  {{ f.file }}:{{ f.lineno }} {{ f.qualname }} [{{ f.role }}]
+{%- endfor %}
+{%- endif %}
+
+{%- if rich_contract_impact %}
+
+Contract impact — suggested fix changes the {{ rich_contract_impact.kind }} of
+{{ debug_root_cause_functions[0] if debug_root_cause_functions else 'the target function' }}.
+{%- if rich_contract_impact.summary %} {{ rich_contract_impact.summary }}{% endif %}
+{%- if rich_contract_impact.callers %}
+Known callers:
+{%- for c in rich_contract_impact.callers %}
+  - {{ c }}
+{%- endfor %}
+{%- if rich_contract_impact.callers_truncated %}
+  …(list truncated)
+{%- endif %}
+{%- endif %}
+{%- endif %}
+
+{%- if rich_related_non_code %}
+
+Related non-code files worth scanning for contract docs / fixtures:
+{%- for h in rich_related_non_code %}
+  - {{ h }}
+{%- endfor %}
+{%- endif %}
+
+{%- if debug_transcript_tail %}
+
+Recent debug-agent tool transcript (most recent 6 actions, trimmed):
+```
+{{ debug_transcript_tail }}
+```
+{%- endif %}
+{%- if rich_branch_observations or rich_pdb_anomalies %}
+
+── PDB session evidence ──
+{%- if rich_branch_observations %}
+The debug agent stepped through these branches; pay attention to the arm actually taken vs what the issue suggests should happen:
+{%- for b in rich_branch_observations %}
+  - {{ b.file }}:{{ b.lineno }}  `{{ b.cond_text }}`  → arm: {{ b.arm_taken }}
+    locals: {% for k, v in b.locals_at_stop.items() %}{{ k }}={{ v }}{% if not loop.last %}, {% endif %}{% endfor %}
+{%- endfor %}
+{%- endif %}
+{%- if rich_pdb_anomalies %}
+
+Anomalous values observed during stepping (None / empty / 0 / type-mismatch / overflow-prone):
+{%- for a in rich_pdb_anomalies %}
+  - {{ a.file }}:{{ a.lineno }}  `{{ a.expr }}` = {{ a.value_repr }}  [{{ a.tags|join(", ") }}]
+{%- endfor %}
+{%- endif %}
+
+These are observations, not verdicts. Cross-check against the issue's contract.
+{%- endif %}
+{%- elif rca_confidence != "missing" %}
+{%- if rca_top1_files or rca_top5_files %}
+
+── Root Cause Analysis Hints (coverage-based{% if rca_confidence == "low" %}, LOW CONFIDENCE{% endif %}) ──
+{%- if rca_confidence == "low" %}
+These candidates are LOW CONFIDENCE: the coverage-based ranker's original
+top-1 was the reproduction test itself (or scored very weakly), meaning the
+signal is noisy. Treat the list below as a weak prior only — independently
+re-localize before editing any of these files.
+{%- else %}
+The following files were ranked most-likely to contain the bug by an automated
+root-cause-analysis agent that analyzed failing-test execution traces. Treat
+them as a STARTING POINT, not a verdict — they are biased toward whatever
+code path the reproduction test happened to exercise. If the repro test
+exercised the wrong layer, RCA will be wrong too.
+{%- endif %}
+
+Top-1 suspicious file(s): {{ rca_top1_files | join(', ') if rca_top1_files else '(none)' }}
+Top-5 suspicious files:   {{ rca_top5_files | join(', ') if rca_top5_files else '(none)' }}
+{%- if rca_evidence %}
+
+RCA evidence (failing tests and candidate statements):
+{{ rca_evidence }}
+{%- endif %}
+{%- endif %}
+{%- if repro_localizer_files %}
+
+── Reproduction-Stage Localizer Hints (independent signal) ──
+A separate LLM-driven localizer (which read the issue text and the repo
+structure, NOT the failing test trace) flagged these files as relevant. This
+is an INDEPENDENT signal from the RCA above — when the two disagree, that is
+a strong red flag that the reproduction test may be exercising the wrong
+layer of the codebase.
+
+Localizer relevant files: {{ repro_localizer_files | join(', ') }}
+{%- if repro_localizer_funcs %}
+Localizer focal functions: {{ repro_localizer_funcs | join(', ') }}
+{%- endif %}
+{%- if repro_only_files %}
+
+⚠ Files flagged by the localizer but MISSING from RCA top-5:
+  {{ repro_only_files | join('\n  ') }}
+These deserve special attention: they were independently identified as
+relevant but the failing test never executed them. Consider whether the bug
+might actually live here and the repro test merely surfaces a downstream
+symptom.
+{%- endif %}
+{%- endif %}
+{%- endif %}
+{%- if debug_reasoning or debug_suggested_fix or debug_root_cause_files or (rca_confidence != "missing") %}
+
+── Verification Requirements (read this BEFORE submitting) ──
+
+The reproduction test that was attached is necessary but NOT sufficient. It
+covers ONE failure mode of the issue. Your patch must satisfy the FULL
+behavioral contract described in the PR description above, including any
+clauses the repro test does not directly check.
+
+Before submitting, you MUST do all of the following:
+
+1. Re-read the entire PR description / "Expected Behavior" section above and
+   build a checklist of every distinct behavior the issue requires.
+2. For each item on that checklist, identify which line(s) of your patch
+   satisfy it. If any item has no corresponding patch logic, you are not done.
+3. Look for adjacent code paths in the same file/class that handle similar
+   inputs — if the issue describes a general principle (e.g. "X must always
+   imply Y"), make sure the principle holds in ALL such paths, not just the
+   one the repro test happens to hit.
+4. Double-check that the file you edited matches the workflow described in
+   the issue. If the issue talks about workflow A but you patched a file in
+   workflow B (e.g. patched the search API for an "import" bug), STOP and
+   investigate the entry point of workflow A first.
+5. Only after the checklist is fully covered should you create patch.txt and
+   submit.
+
+Do NOT stop just because the failing reproduction test turned green. A patch
+that minimally flips the repro test red→green but leaves other parts of the
+behavior contract unaddressed will fail the hidden test suite.
+{%- endif %}

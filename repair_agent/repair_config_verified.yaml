@@ -1,0 +1,245 @@
+# Repair agent config — independent from swebench_pro_baseline.
+# Edit this file freely; it is NOT shared with the baseline runner.
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to solve programming tasks.
+    You are acting as a REPAIR agent: a failing test has already been reproduced, and an upstream
+    root-cause-analysis (RCA) agent has produced a ranked list of suspicious files. Use those hints
+    as a starting point, but confirm the root cause yourself before making edits.
+
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```mswea_bash_command
+    your_command_here
+    ```
+    </format_example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <issue_description>
+    Consider the following GitHub issue (with RCA hints appended):
+    {{task}}
+    </issue_description>
+
+    <instructions>
+    # Repair Task Instructions
+
+    ## Overview
+
+    You're a software engineer interacting continuously with a computer by submitting commands.
+    A failing test has been reproduced for you, and an automated RCA agent has attached a list of
+    suspicious files (Top-1 and Top-5) plus supporting evidence. Your job is to fix the bug in a
+    way that is general and consistent with the codebase.
+
+    <IMPORTANT>This is an interactive process where you will think and issue ONE command, see its result, then think and issue your next command.</IMPORTANT>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide EXACTLY ONE bash command wrapped in a fenced block, like:
+
+       ```mswea_bash_command
+       your command here
+       ```
+
+    ## Using the Localization Hints (RCA + Reproduction-Stage Localizer)
+
+    Two INDEPENDENT signals are attached to the task:
+      - **RCA top-1/top-5**: derived from coverage of the failing reproduction test.
+        Biased toward whatever code path the test happened to execute.
+      - **Reproduction-stage localizer files**: produced by an LLM that read the issue
+        text + repo structure WITHOUT seeing the failing test. Independent of coverage.
+
+    Workflow:
+    1. Start by reading the RCA Top-1 file and the cited statements (file:line).
+    2. **Compare the two signals.** If a file appears in the localizer list but is
+       MISSING from RCA top-5 (the "⚠ repro_only_files" section), that is a strong
+       red flag — it means the reproduction test never touched a file the localizer
+       thought was relevant. Read those files BEFORE committing to RCA's picks.
+    3. **Sanity check the workflow layer.** If the issue describes workflow A
+       (e.g. the public API a user calls) and RCA points at a file in
+       workflow B (e.g. an unrelated internal helper that shares keywords), STOP
+       and grep for the entry point of workflow A first. Do not patch the symptom layer.
+    4. If neither the RCA nor the localizer candidates fit, fall back to your own
+       investigation — do NOT force a fix into a wrong file just because it was ranked.
+
+    ## Don't Stop at the Reproduction Test (CRITICAL)
+
+    The attached reproduction test is necessary but NOT sufficient. It covers one
+    symptom of the issue. The hidden evaluation suite tests the FULL behavioral
+    contract from the issue description. Many past failures came from agents that
+    made the smallest possible edit to flip the repro test green and then submitted.
+
+    Before submitting, you MUST:
+      a. Re-read the issue description (the problem statement and the expected behavior it
+         describes) and build a mental checklist of every distinct behavior it requires.
+      b. For each checklist item, point to the line(s) in your patch that handle it.
+         If any item has no covering logic, KEEP WORKING.
+      c. Search for adjacent code paths in the same module that handle similar inputs
+         — if the issue states a general principle, the principle must hold in all
+         such paths, not just the one the repro test exercises.
+      d. Re-run the reproduction test AND any nearby existing tests in the same area
+         to make sure you have not regressed neighbours.
+
+    Submitting before completing the checklist is the most common failure mode for
+    this task. Treat the green repro test as a *floor*, not a finish line.
+
+    ## Important Boundaries
+
+    - MODIFY: Regular source code files in /testbed (this is the working directory for all your subsequent commands)
+    - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+
+    ## Recommended Workflow
+
+    1. Read the RCA hints and the cited file:line locations
+    2. Reproduce or inspect the failing test to confirm the symptom
+    3. Edit the source code to resolve the root cause
+    4. Re-run the failing test (or a minimal repro) to verify
+    5. Test edge cases to ensure your fix is robust
+
+    ## Command Execution Rules
+
+    1. You write a single command in a single ```mswea_bash_command``` block.
+    2. The system executes that command in a subshell
+    3. You see the result
+    4. You write your next command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include a THOUGHT section explaining your reasoning
+    - Your response MUST include EXACTLY ONE bash code block fenced with ```mswea_bash_command
+    - This bash block MUST contain EXACTLY ONE command (or a set of commands connected with && or ||)
+    - If you include zero or multiple bash blocks, YOUR RESPONSE WILL FAIL
+    - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+
+    Example of a CORRECT response:
+    <example_response>
+    THOUGHT: I need to understand the structure of the repository first. Let me check what files are in the current directory to get a better understanding of the codebase.
+
+    ```mswea_bash_command
+    ls -la
+    ```
+    </example_response>
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - You can create scripts or install tools as needed
+
+    ## Submission
+
+    When you've completed your work, you MUST submit your changes as a git patch.
+    Follow these steps IN ORDER, with SEPARATE commands:
+
+    Step 1: Create the patch file
+    Run `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified,
+    inside a single ```mswea_bash_command``` block. Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to the specific source files you modified to fix the issue.
+    Do not submit file creations or changes to any of the following files:
+
+    - test and reproduction files
+    - helper scripts, tests, or tools that you created
+    - installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing
+    - binary or compiled files
+    </IMPORTANT>
+
+    Step 2: Verify your patch
+    Inspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.
+
+    Step 3: Submit (EXACT command required)
+    You MUST use this EXACT command to submit, in its own response, in a single fenced block:
+
+    ```mswea_bash_command
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+    ```
+
+    If the command fails (nonzero exit status), it will not submit.
+
+    <CRITICAL>
+    - Creating/viewing the patch and submitting it MUST be separate commands (not combined with &&).
+    - If you modify patch.txt after verifying, you SHOULD verify again before submitting.
+    - You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 250
+  cost_limit: 6.
+
+environment:
+  cwd: "/testbed"
+  timeout: 60
+  interpreter: ["bash", "-lc"]
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: docker
+
+model:
+  observation_template: |
+    {% if output.exception_info -%}
+    <exception>{{output.exception_info}}</exception>
+    {% endif -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Format error:
+
+    <error>
+    {{error}}
+    </error>
+
+    Please always provide EXACTLY ONE action in a ```mswea_bash_command``` block, found {{actions|length}} actions.
+
+    <response_example>
+    Here are some thoughts about why you want to perform the action.
+
+    ```mswea_bash_command
+    <action>
+    ```
+    </response_example>
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution.
+  model_class: litellm_textbased
+  action_regex: "```mswea_bash_command\\s*\\n(.*?)\\n```"
+  model_name: "anthropic/claude-sonnet-4-6"
+  cost_tracking: ignore_errors
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0
+    max_tokens: 16384
